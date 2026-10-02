@@ -26,6 +26,27 @@ const SUPABASE_HEADERS = {
   "Content-Type": "application/json",
 };
 
+// Vérifie qu'aucune sélection ne contient plus de 2 créneaux consécutifs.
+// L'ordre de TIME_SLOTS permet de gérer correctement 23h -> 0h -> 1h.
+function hasMoreThanTwoConsecutiveSlots(slots: number[]): boolean {
+  const selectedIndexes = TIME_SLOTS
+    .map((hour, index) => (slots.includes(hour) ? index : -1))
+    .filter((index) => index !== -1);
+
+  let consecutiveCount = 1;
+
+  for (let i = 1; i < selectedIndexes.length; i++) {
+    if (selectedIndexes[i] === selectedIndexes[i - 1] + 1) {
+      consecutiveCount += 1;
+      if (consecutiveCount > 2) return true;
+    } else {
+      consecutiveCount = 1;
+    }
+  }
+
+  return false;
+}
+
 function toLocalDateStr(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
@@ -100,13 +121,24 @@ export function BookingCalendar() {
       if (prevSlots.includes(hour)) {
         return prevSlots.filter(slot => slot !== hour);
       } else {
-        return [...prevSlots, hour];
+        const nextSlots = [...prevSlots, hour];
+
+        if (hasMoreThanTwoConsecutiveSlots(nextSlots)) {
+          toast.error("Maximum 2 heures consécutives. Choisissez un autre créneau plus tard dans la journée.");
+          return prevSlots;
+        }
+
+        return nextSlots;
       }
     });
   };
 
   const handleOpenDialog = () => {
     if (selectedSlots.length > 0) {
+      if (hasMoreThanTwoConsecutiveSlots(selectedSlots)) {
+        toast.error("Vous ne pouvez pas réserver plus de 2 heures consécutives.");
+        return;
+      }
       setDialogOpen(true);
     }
   };
@@ -114,6 +146,11 @@ export function BookingCalendar() {
   const handleBooking = async () => {
     if (!selectedDate || selectedSlots.length === 0 || !clientName || !clientEmail) {
       console.error("Booking validation failed", { selectedDate, selectedSlots, clientName, clientEmail });
+      return;
+    }
+
+    if (hasMoreThanTwoConsecutiveSlots(selectedSlots)) {
+      toast.error("Vous ne pouvez pas réserver plus de 2 heures consécutives.");
       return;
     }
 
@@ -317,6 +354,17 @@ export function BookingCalendar() {
               )}
             </CardContent>
           </Card>
+        </div>
+
+        {/* Règle de réservation */}
+        <div className="mt-6 p-4 rounded-lg bg-[#374151] border border-[#c9a66b]/60 text-center">
+          <p className="text-[#c9a66b] font-semibold mb-1">
+            Maximum 2 heures consécutives
+          </p>
+          <p className="text-gray-300 text-sm leading-relaxed">
+            Vous pouvez réserver plusieurs créneaux dans la même journée, mais jamais plus de 2 heures d'affilée.
+            Si nous constatons plusieurs réservations permettant de dépasser cette limite, nous nous réservons le droit d'annuler les créneaux concernés.
+          </p>
         </div>
 
         {/* Booking Modal - Version inline sans Portal */}
