@@ -61,7 +61,7 @@ export const handler = async (event: {
   }
 
   try {
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/kv_store_2b20b999`, {
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/make-server-2b20b999/bookings`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -69,7 +69,7 @@ export const handler = async (event: {
         apikey: SUPABASE_ANON_KEY,
         Prefer: "resolution=merge-duplicates",
       },
-      body: JSON.stringify({ key: `booking:${id}`, value: booking }),
+      body: JSON.stringify(booking),
     });
 
     if (!response.ok) {
