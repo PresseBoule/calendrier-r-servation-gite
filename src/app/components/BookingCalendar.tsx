@@ -7,48 +7,12 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Droplets, Flame, X } from "lucide-react";
 import { toast } from "sonner";
-import { projectId, publicAnonKey, supabase } from "../utils/supabase/info";
+import { projectId, publicAnonKey } from "../utils/supabase/info";
+import { HOURS as TIME_SLOTS, hasTooManyConsecutiveHours as hasMoreThanTwoConsecutiveSlots, localDateKey as toLocalDateStr } from "../lib/bookingRules.mjs";
 
 interface Booking {
-  id: string;
   date: string;
   hour: number;
-  clientName: string;
-  clientEmail: string;
-}
-
-// Créneaux de 12h à 2h du matin (14 créneaux d'1h)
-const TIME_SLOTS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1];
-
-const SUPABASE_HEADERS = {
-  Authorization: `Bearer ${publicAnonKey}`,
-  apikey: publicAnonKey,
-  "Content-Type": "application/json",
-};
-
-// Vérifie qu'aucune sélection ne contient plus de 2 créneaux consécutifs.
-// L'ordre de TIME_SLOTS permet de gérer correctement 23h -> 0h -> 1h.
-function hasMoreThanTwoConsecutiveSlots(slots: number[]): boolean {
-  const selectedIndexes = TIME_SLOTS
-    .map((hour, index) => (slots.includes(hour) ? index : -1))
-    .filter((index) => index !== -1);
-
-  let consecutiveCount = 1;
-
-  for (let i = 1; i < selectedIndexes.length; i++) {
-    if (selectedIndexes[i] === selectedIndexes[i - 1] + 1) {
-      consecutiveCount += 1;
-      if (consecutiveCount > 2) return true;
-    } else {
-      consecutiveCount = 1;
-    }
-  }
-
-  return false;
-}
-
-function toLocalDateStr(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 export function BookingCalendar() {
@@ -59,10 +23,16 @@ export function BookingCalendar() {
   const [clientEmail, setClientEmail] = useState("");
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // Recharger les réservations à chaque changement de date
   useEffect(() => {
-    fetchBookings();
+    void fetchBookings();
+    const refresh = () => { if(document.visibilityState === "visible") void fetchBookings(); };
+    window.addEventListener("focus",refresh);
+    document.addEventListener("visibilitychange",refresh);
+    return () => {window.removeEventListener("focus",refresh);document.removeEventListener("visibilitychange",refresh);};
   }, [selectedDate]);
 
   // Nettoyer le formulaire quand le Dialog se ferme
@@ -74,21 +44,22 @@ export function BookingCalendar() {
   }, [dialogOpen]);
 
   const fetchBookings = async () => {
+    setLoading(true);
     try {
       const response = await fetch(
-        `https://${projectId}.supabase.co/rest/v1/kv_store_2b20b999?select=value`,
-        { headers: SUPABASE_HEADERS }
+        `https://${projectId}.supabase.co/functions/v1/make-server-2b20b999/bookings`,
+        { headers: {Authorization:`Bearer ${publicAnonKey}`}, cache:"no-store",signal:AbortSignal.timeout(15000) }
       );
 
       if (response.ok) {
-        const rows = await response.json();
-        const bookings = rows.map((row: any) => row.value);
-        setBookings(bookings || []);
+        const data = await response.json();
+        if(!Array.isArray(data.bookings))throw Error("Calendrier incomplet");
+        setBookings(data.bookings);setLoadError(false);
       } else {
-        console.error("Failed to fetch bookings", response.status);
+        throw Error("Calendrier indisponible");
       }
     } catch (error) {
-      console.error("Error fetching bookings:", error);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -114,7 +85,7 @@ export function BookingCalendar() {
   };
 
   const handleSlotClick = (hour: number) => {
-    if (isSlotBooked(hour)) return;
+    if (loading || loadError || saving || isSlotBooked(hour)) return;
     
     // Toggle slot selection
     setSelectedSlots(prevSlots => {
@@ -134,7 +105,7 @@ export function BookingCalendar() {
   };
 
   const handleOpenDialog = () => {
-    if (selectedSlots.length > 0) {
+    if (!loading && !loadError && !saving && selectedSlots.length > 0) {
       if (hasMoreThanTwoConsecutiveSlots(selectedSlots)) {
         toast.error("Vous ne pouvez pas réserver plus de 2 heures consécutives.");
         return;
@@ -144,8 +115,7 @@ export function BookingCalendar() {
   };
 
   const handleBooking = async () => {
-    if (!selectedDate || selectedSlots.length === 0 || !clientName || !clientEmail) {
-      console.error("Booking validation failed", { selectedDate, selectedSlots, clientName, clientEmail });
+    if (saving || loading || loadError || !selectedDate || selectedSlots.length === 0 || !clientName || !clientEmail) {
       return;
     }
 
@@ -155,27 +125,14 @@ export function BookingCalendar() {
     }
 
     const dateStr = toLocalDateStr(selectedDate);
-    const newBookings: Booking[] = selectedSlots.map(hour => ({
-      id: `${Date.now()}-${hour}`,
-      date: dateStr,
-      hour,
-      clientName,
-      clientEmail,
-    }));
-
+    setSaving(true);
     try {
-      // Sauvegarder via supabase-js
-      for (const booking of newBookings) {
-        const { error: saveError } = await supabase
-          .from("kv_store_2b20b999")
-          .upsert({ key: `booking:${booking.id}`, value: booking });
-
-        if (saveError) {
-          console.error("Erreur sauvegarde:", saveError.message);
-          toast.error("Erreur lors de la sauvegarde de la réservation");
-          return;
-        }
-      }
+      const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-2b20b999/bookings/batch`, {
+        method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${publicAnonKey}`},
+        body:JSON.stringify({date:dateStr,slots:selectedSlots,clientName,clientEmail}),
+      });
+      const result=await response.json();
+      if(!response.ok || !result.success){await fetchBookings();setSelectedSlots([]);setDialogOpen(false);toast.error(result.error || "Impossible d’enregistrer. Actualisez le calendrier.");return;}
 
       // Envoyer l'email de confirmation (optionnel, ne bloque pas le succès)
       let emailSent = false;
@@ -222,8 +179,9 @@ export function BookingCalendar() {
       setDialogOpen(false);
       setSelectedSlots([]);
     } catch (error) {
-      console.error("Error during booking:", error);
-    }
+      toast.error("Enregistrement non confirmé. Actualisez avant de réessayer.");
+      await fetchBookings();
+    } finally { setSaving(false); }
   };
 
   return (
@@ -294,7 +252,7 @@ export function BookingCalendar() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {loading ? (
+              {loadError ? <div role="alert" className="text-white py-8">Calendrier indisponible. Aucune réservation ne peut être effectuée.<Button onClick={() => void fetchBookings()}>Réessayer</Button></div> : loading ? (
                 <div className="text-center text-[#c9a66b] py-8">Chargement des réservations...</div>
               ) : (
                 <>
@@ -310,7 +268,7 @@ export function BookingCalendar() {
                         e.stopPropagation();
                         handleSlotClick(hour);
                       }}
-                      disabled={isBooked}
+                      disabled={isBooked || saving}
                       type="button"
                       className={`
                         p-4 rounded-lg border-2 transition-colors duration-200
@@ -447,7 +405,7 @@ export function BookingCalendar() {
                 </Button>
                 <Button
                   onClick={handleBooking}
-                  disabled={!clientName || !clientEmail}
+                  disabled={!clientName || !clientEmail || saving || loading || loadError}
                   className="bg-[#c9a66b] text-[#1f2937] hover:bg-[#b8944d] disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Confirmer la réservation
